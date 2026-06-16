@@ -45,6 +45,13 @@ From the repository root:
 docker compose up --build
 ```
 
+The frontend is exposed on port `80`, and the backend remains available on port `8000`:
+
+```text
+http://localhost/
+http://localhost:8000/health
+```
+
 The backend receives:
 
 ```text

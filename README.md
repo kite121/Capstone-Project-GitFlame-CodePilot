@@ -22,10 +22,7 @@ Backend:
 
 ```bash
 cd backend
-python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-uvicorn app.main:app --reload --port 8000
+go run ./cmd/server
 ```
 
 ML service:
@@ -46,10 +43,18 @@ npm install
 npm run dev
 ```
 
+Docker Compose:
+
+```bash
+docker compose up --build
+```
+
 ## Health Checks
 
 ```text
+Frontend:   http://localhost/
 Backend:    GET http://localhost:8000/health
+Backend via frontend proxy: GET http://localhost/api/health
 ML service: GET http://localhost:8001/health
 ```
 
