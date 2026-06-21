@@ -181,3 +181,26 @@ FROM recommendation_runs
 JOIN repositories ON repositories.id = recommendation_runs.repository_id
 JOIN recommendations ON recommendations.recommendation_run_id = recommendation_runs.id
 WHERE recommendation_runs.id = '66666666-6666-6666-6666-666666666666';
+
+SELECT
+    t.id AS task_id,
+    t.task_type,
+    t.status,
+    t.attempt,
+    t.model,
+    t.tool_execution_summary,
+    s.external_issue_id,
+    s.revision
+FROM agent_tasks t
+JOIN issue_sessions s ON s.id = t.issue_session_id
+ORDER BY t.created_at DESC
+LIMIT 20;
+
+SELECT
+    issue_session_id,
+    revision,
+    correction_feedback,
+    created_at
+FROM plan_revisions
+ORDER BY created_at DESC
+LIMIT 20;

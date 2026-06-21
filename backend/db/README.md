@@ -1,6 +1,6 @@
 # Backend Database Schema
 
-This folder contains the first PostgreSQL schema files for the GitFlame CodePilot backend storage layer.
+This folder contains the PostgreSQL schema and migrations for the GitFlame CodePilot backend storage layer.
 
 `schema.sql` creates the Sprint 1 tables:
 
@@ -12,6 +12,8 @@ This folder contains the first PostgreSQL schema files for the GitFlame CodePilo
 - `recommendation_runs`
 - `recommendations`
 - `recommendation_statuses`
+- `plan_revisions`
+- `agent_tasks`
 
 The schema uses PostgreSQL-friendly types:
 
@@ -26,4 +28,14 @@ After the PostgreSQL container is running, the schema can be applied with:
 psql postgresql://gitflame:gitflame@localhost:5432/gitflame_codepilot -f backend/db/schema.sql
 ```
 
-The next verification step is to insert sample issue workflow and recommendation records, then confirm them with `SELECT` queries or a pgAdmin screenshot.
+For a database created from the Sprint 1 schema, apply the Sprint 2 migration:
+
+```bash
+psql "$DATABASE_URL" -f backend/db/migrations/002_sprint2_agent_tasks.sql
+```
+
+The PostgreSQL integration test is opt-in:
+
+```bash
+TEST_DATABASE_URL="$DATABASE_URL" go test ./internal/repository -run TestPostgresIssueTaskPersistence
+```

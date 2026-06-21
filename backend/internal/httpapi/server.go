@@ -1,0 +1,350 @@
+package httpapi
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"strings"
+	"time"
+
+	"gitflame-codepilot/backend/internal/agent"
+	"gitflame-codepilot/backend/internal/config"
+	"gitflame-codepilot/backend/internal/domain"
+	"gitflame-codepilot/backend/internal/queue"
+	"gitflame-codepilot/backend/internal/repository"
+	"gitflame-codepilot/backend/internal/service"
+)
+
+type Server struct {
+	workflow *service.Workflow
+	store    repository.Store
+	router   *http.ServeMux
+	checks   map[string]func(context.Context) error
+}
+
+func New(cfg config.Config) (*Server, error) {
+	var store repository.Store = repository.NewMemoryStore()
+	if cfg.DatabaseURL != "" {
+		postgres, err := repository.NewPostgresStore(context.Background(), cfg.DatabaseURL)
+		if err != nil {
+			return nil, err
+		}
+		store = postgres
+	}
+	engine := agent.NewClient(cfg.AgentEngineURL, cfg.AgentTimeout)
+	checks := map[string]func(context.Context) error{"storage": store.Ping, "agent_engine": engine.Ready}
+	if cfg.DispatchMode == "redis" {
+		if cfg.DatabaseURL == "" {
+			return nil, errors.New("TASK_DISPATCH_MODE=redis requires DATABASE_URL")
+		}
+		broker, err := queue.NewRedisBroker(cfg.RedisURL, cfg.AgentQueueName, cfg.AgentConsumerGroup, cfg.QueueMaxLength)
+		if err != nil {
+			return nil, err
+		}
+		checks["redis"] = broker.Ping
+		return newServer(service.NewQueuedWorkflow(store, broker), store, checks), nil
+	}
+	return newServer(service.NewWorkflow(store, engine), store, checks), nil
+}
+func NewWithDependencies(store repository.Store, generator agent.PlanGenerator) *Server {
+	return newServer(service.NewWorkflow(store, generator), store, map[string]func(context.Context) error{"storage": store.Ping})
+}
+
+func newServer(workflow *service.Workflow, store repository.Store, checks map[string]func(context.Context) error) *Server {
+	s := &Server{workflow: workflow, store: store, checks: checks}
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /health", s.health)
+	mux.HandleFunc("GET /ready", s.ready)
+	mux.HandleFunc("GET /docs", s.docs)
+	mux.HandleFunc("GET /swagger/", s.docs)
+	mux.HandleFunc("GET /swagger/index.html", s.docs)
+	mux.HandleFunc("GET /openapi.json", s.openAPI)
+	mux.HandleFunc("POST /integrations/gitflame/issues/analyze", s.analyze)
+	mux.HandleFunc("GET /ai/tasks/{taskId}", s.task)
+	mux.HandleFunc("POST /ai/tasks/{taskId}/retry", s.retryTask)
+	mux.HandleFunc("GET /ai/issues/{id}/plan", s.plan)
+	mux.HandleFunc("POST /ai/issues/{id}/approve", s.approve)
+	mux.HandleFunc("POST /ai/issues/{id}/correct", s.correct)
+	mux.HandleFunc("POST /ai/issues/{id}/reject", s.reject)
+	mux.HandleFunc("POST /integrations/gitflame/repositories/{id}/recommendations/analyze", s.analyzeRecommendations)
+	mux.HandleFunc("GET /repositories/{id}/recommendations/status", s.recommendationStatus)
+	mux.HandleFunc("GET /repositories/{id}/recommendations/summary", s.recommendationSummary)
+	mux.HandleFunc("GET /repositories/{id}/recommendations", s.recommendations)
+	mux.HandleFunc("PATCH /recommendations/{id}/close", s.closeRecommendation)
+	mux.HandleFunc("DELETE /recommendations/{id}", s.deleteRecommendation)
+	s.router = mux
+	return s
+}
+func (s *Server) Router() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/docs" && !strings.HasPrefix(r.URL.Path, "/swagger/") {
+			w.Header().Set("Content-Type", "application/json")
+		}
+		s.router.ServeHTTP(w, r)
+	})
+}
+
+func (s *Server) health(w http.ResponseWriter, _ *http.Request) {
+	write(w, 200, map[string]string{"status": "ok", "service": "backend"})
+}
+func (s *Server) ready(w http.ResponseWriter, r *http.Request) {
+	components := make(map[string]string, len(s.checks))
+	status := http.StatusOK
+	for name, check := range s.checks {
+		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+		err := check(ctx)
+		cancel()
+		if err != nil {
+			components[name] = "unavailable"
+			status = http.StatusServiceUnavailable
+		} else {
+			components[name] = "ready"
+		}
+	}
+	state := "ready"
+	if status != http.StatusOK {
+		state = "not_ready"
+	}
+	write(w, status, map[string]any{"status": state, "service": "backend", "components": components})
+}
+func (s *Server) docs(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	_, _ = w.Write([]byte(`<!doctype html><html><head><title>GitFlame CodePilot API</title><link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist@5/swagger-ui.css"></head><body><div id="swagger-ui"></div><script src="https://unpkg.com/swagger-ui-dist@5/swagger-ui-bundle.js"></script><script>SwaggerUIBundle({url:"/openapi.json",dom_id:"#swagger-ui"})</script></body></html>`))
+}
+
+type analyzeResponse struct {
+	SessionID    string `json:"session_id"`
+	TaskID       string `json:"task_id"`
+	IssueID      string `json:"issue_id"`
+	RepositoryID string `json:"repository_id"`
+	Status       string `json:"status"`
+	StatusURL    string `json:"status_url"`
+}
+
+func (s *Server) analyze(w http.ResponseWriter, r *http.Request) {
+	var req domain.IssueAnalyzeRequest
+	if err := decode(r, &req); err != nil {
+		problem(w, 400, "invalid_json", err.Error())
+		return
+	}
+	session, task, err := s.workflow.Analyze(req)
+	if err != nil {
+		workflowError(w, err)
+		return
+	}
+	write(w, 202, analyzeResponse{session.ID, task.ID, req.Issue.ID, req.Repository.ID, task.Status, "/ai/tasks/" + task.ID})
+}
+
+type taskResponse struct {
+	TaskID               string                `json:"task_id"`
+	SessionID            string                `json:"session_id"`
+	IssueID              string                `json:"issue_id"`
+	Type                 string                `json:"type"`
+	Status               string                `json:"status"`
+	Attempt              int                   `json:"attempt"`
+	PlanMarkdown         string                `json:"plan_markdown,omitempty"`
+	ToolExecutionSummary string                `json:"tool_execution_summary,omitempty"`
+	RelevantFiles        []domain.RelevantFile `json:"relevant_files,omitempty"`
+	Model                string                `json:"model,omitempty"`
+	Usage                domain.AgentUsage     `json:"usage,omitempty"`
+	Error                *domain.TaskError     `json:"error,omitempty"`
+}
+
+func (s *Server) task(w http.ResponseWriter, r *http.Request) {
+	v, err := s.workflow.Task(r.PathValue("taskId"))
+	if err != nil {
+		resourceError(w, err, "task_not_found", "agent task was not found")
+		return
+	}
+	write(w, 200, taskResponse{
+		TaskID: v.ID, SessionID: v.SessionID, IssueID: v.IssueID, Type: v.Type,
+		Status: v.Status, Attempt: v.Attempt, PlanMarkdown: v.PlanMarkdown, ToolExecutionSummary: v.ToolExecutionSummary,
+		RelevantFiles: v.RelevantFiles, Model: v.Model, Usage: v.Usage, Error: v.Error,
+	})
+}
+
+func (s *Server) retryTask(w http.ResponseWriter, r *http.Request) {
+	task, err := s.workflow.Retry(r.PathValue("taskId"))
+	if err != nil {
+		workflowError(w, err)
+		return
+	}
+	write(w, http.StatusAccepted, actionResponse{SessionID: task.SessionID, IssueID: task.IssueID, Status: task.Status, Message: "Retry task queued.", TaskID: task.ID, StatusURL: "/ai/tasks/" + task.ID})
+}
+
+type planResponse struct {
+	SessionID    string `json:"session_id"`
+	IssueID      string `json:"issue_id"`
+	RepositoryID string `json:"repository_id"`
+	Status       string `json:"status"`
+	PlanMarkdown string `json:"plan_markdown"`
+	Revision     int    `json:"revision"`
+}
+
+func (s *Server) plan(w http.ResponseWriter, r *http.Request) {
+	v, err := s.workflow.Session(r.PathValue("id"))
+	if err != nil {
+		resourceError(w, err, "session_not_found", "issue session was not found")
+		return
+	}
+	if strings.TrimSpace(v.PlanMarkdown) == "" {
+		problem(w, 409, "plan_not_ready", "plan generation has not completed")
+		return
+	}
+	write(w, 200, planResponse{v.ID, v.Request.Issue.ID, v.Request.Repository.ID, v.Status, v.PlanMarkdown, v.Revision})
+}
+
+type actionResponse struct {
+	SessionID      string                         `json:"session_id"`
+	IssueID        string                         `json:"issue_id"`
+	Status         string                         `json:"status"`
+	Message        string                         `json:"message"`
+	TaskID         string                         `json:"task_id,omitempty"`
+	StatusURL      string                         `json:"status_url,omitempty"`
+	GeneratedFiles *domain.GeneratedFilesContract `json:"generated_files_contract,omitempty"`
+}
+
+func (s *Server) approve(w http.ResponseWriter, r *http.Request) {
+	v, err := s.workflow.Approve(r.PathValue("id"))
+	if err != nil {
+		workflowError(w, err)
+		return
+	}
+	write(w, 200, actionResponse{SessionID: v.ID, IssueID: v.Request.Issue.ID, Status: v.Status, Message: "Plan approved. Contract is ready for a future code-generation worker.", GeneratedFiles: v.GeneratedFiles})
+}
+func (s *Server) correct(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Feedback string `json:"feedback"`
+	}
+	if err := decode(r, &req); err != nil {
+		problem(w, 400, "invalid_json", err.Error())
+		return
+	}
+	task, err := s.workflow.Correct(r.PathValue("id"), req.Feedback)
+	if err != nil {
+		workflowError(w, err)
+		return
+	}
+	write(w, 202, actionResponse{SessionID: task.SessionID, IssueID: task.IssueID, Status: task.Status, Message: "Correction task queued.", TaskID: task.ID, StatusURL: "/ai/tasks/" + task.ID})
+}
+func (s *Server) reject(w http.ResponseWriter, r *http.Request) {
+	v, err := s.workflow.Reject(r.PathValue("id"))
+	if err != nil {
+		workflowError(w, err)
+		return
+	}
+	write(w, 200, actionResponse{SessionID: v.ID, IssueID: v.Request.Issue.ID, Status: v.Status, Message: "Plan rejected."})
+}
+
+func (s *Server) analyzeRecommendations(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Repository        domain.RepositoryMetadata `json:"repository"`
+		YAMLConfig        string                    `json:"yaml_config"`
+		RepositoryContext []string                  `json:"repository_context"`
+	}
+	if err := decode(r, &req); err != nil {
+		problem(w, 400, "invalid_json", err.Error())
+		return
+	}
+	if req.Repository.ID != r.PathValue("id") {
+		problem(w, 422, "validation_error", "path repository id must match payload repository id")
+		return
+	}
+	if _, err := service.ParseAIConfig(req.YAMLConfig); err != nil {
+		problem(w, 422, "validation_error", err.Error())
+		return
+	}
+	confidence := .72
+	cards := []domain.RecommendationCard{{ID: repository.NewID(), Severity: "low", File: "README.md", Problem: "Project setup documentation is minimal.", Suggestion: "Document Sprint 2 Agent Engine configuration.", Confidence: &confidence, State: "open"}}
+	report, err := s.store.SaveRecommendations(req.Repository.ID, "Local recommendation fallback completed.", cards)
+	if err != nil {
+		problem(w, 500, "storage_error", err.Error())
+		return
+	}
+	write(w, 200, map[string]any{"repository_id": report.RepositoryID, "status": report.Status, "summary": report.Summary, "recommendations": report.Recommendations})
+}
+func (s *Server) recommendationStatus(w http.ResponseWriter, r *http.Request) {
+	v, err := s.store.Recommendations(r.PathValue("id"))
+	if err != nil {
+		resourceError(w, err, "recommendations_not_found", "recommendation report was not found")
+		return
+	}
+	closed := 0
+	for _, c := range v.Recommendations {
+		if c.State == "closed" {
+			closed++
+		}
+	}
+	write(w, 200, map[string]any{"repository_id": v.RepositoryID, "status": v.Status, "total": len(v.Recommendations), "open": len(v.Recommendations) - closed, "closed": closed})
+}
+func (s *Server) recommendationSummary(w http.ResponseWriter, r *http.Request) {
+	v, err := s.store.Recommendations(r.PathValue("id"))
+	if err != nil {
+		resourceError(w, err, "recommendations_not_found", "recommendation report was not found")
+		return
+	}
+	write(w, 200, map[string]string{"repository_id": v.RepositoryID, "summary": v.Summary})
+}
+func (s *Server) recommendations(w http.ResponseWriter, r *http.Request) {
+	v, err := s.store.Recommendations(r.PathValue("id"))
+	if err != nil {
+		resourceError(w, err, "recommendations_not_found", "recommendation report was not found")
+		return
+	}
+	write(w, 200, map[string]any{"repository_id": v.RepositoryID, "recommendations": v.Recommendations})
+}
+func (s *Server) closeRecommendation(w http.ResponseWriter, r *http.Request) {
+	v, err := s.store.CloseRecommendation(r.PathValue("id"))
+	if err != nil {
+		resourceError(w, err, "recommendation_not_found", "recommendation was not found")
+		return
+	}
+	write(w, 200, v)
+}
+func (s *Server) deleteRecommendation(w http.ResponseWriter, r *http.Request) {
+	if err := s.store.DeleteRecommendation(r.PathValue("id")); err != nil {
+		resourceError(w, err, "recommendation_not_found", "recommendation was not found")
+		return
+	}
+	w.WriteHeader(204)
+}
+
+func decode(r *http.Request, v any) error {
+	defer r.Body.Close()
+	d := json.NewDecoder(r.Body)
+	d.DisallowUnknownFields()
+	if err := d.Decode(v); err != nil {
+		return err
+	}
+	if d.Decode(&struct{}{}) == nil {
+		return errors.New("request body must contain one JSON object")
+	}
+	return nil
+}
+func write(w http.ResponseWriter, status int, v any) {
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(v)
+}
+func problem(w http.ResponseWriter, status int, code, detail string) {
+	write(w, status, map[string]any{"status": status, "code": code, "detail": detail})
+}
+func workflowError(w http.ResponseWriter, err error) {
+	if errors.Is(err, service.ErrDispatch) {
+		problem(w, http.StatusServiceUnavailable, "queue_unavailable", err.Error())
+		return
+	}
+	if errors.Is(err, repository.ErrNotFound) {
+		problem(w, 404, "session_not_found", err.Error())
+		return
+	}
+	problem(w, 422, "invalid_workflow_state", err.Error())
+}
+
+func resourceError(w http.ResponseWriter, err error, notFoundCode, notFoundDetail string) {
+	if errors.Is(err, repository.ErrNotFound) {
+		problem(w, 404, notFoundCode, notFoundDetail)
+		return
+	}
+	problem(w, 500, "storage_error", err.Error())
+}

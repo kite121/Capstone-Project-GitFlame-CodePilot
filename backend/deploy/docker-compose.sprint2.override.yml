@@ -1,0 +1,42 @@
+services:
+  backend:
+    environment:
+      AGENT_ENGINE_URL: http://ml-service:8001
+      AGENT_ENGINE_TIMEOUT_SECONDS: "600"
+      TASK_DISPATCH_MODE: redis
+      AGENT_QUEUE_NAME: gitflame:agent:tasks
+      AGENT_CONSUMER_GROUP: gitflame-agent-workers
+      AGENT_QUEUE_MAX_LENGTH: "1000"
+    depends_on:
+      redis:
+        condition: service_healthy
+      database:
+        condition: service_started
+      ml-service:
+        condition: service_started
+
+  agent-worker:
+    build:
+      context: ./backend
+    command: ["/app/agent-worker"]
+    environment:
+      AGENT_ENGINE_URL: http://ml-service:8001
+      AGENT_ENGINE_TIMEOUT_SECONDS: "600"
+      DATABASE_URL: postgresql://gitflame:gitflame@database:5432/gitflame_codepilot
+      REDIS_URL: redis://redis:6379/0
+      AGENT_QUEUE_NAME: gitflame:agent:tasks
+      AGENT_CONSUMER_GROUP: gitflame-agent-workers
+      AGENT_QUEUE_MAX_LENGTH: "1000"
+      WORKER_MAX_RETRIES: "3"
+    depends_on:
+      redis:
+        condition: service_healthy
+      database:
+        condition: service_started
+      ml-service:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "/app/agent-worker", "-healthcheck"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
