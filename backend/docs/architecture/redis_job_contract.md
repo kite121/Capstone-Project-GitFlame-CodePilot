@@ -20,13 +20,13 @@ Each task stream entry contains one `job` field with JSON:
 {
   "task_id": "uuid",
   "session_id": "uuid",
-  "type": "generate",
+  "type": "initial_plan",
   "attempt": 1,
   "request": {
     "request_id": "uuid",
     "issue": {},
     "repository": {},
-    "configuration": {},
+    "configuration_yaml": "version: 1\nanalysis:\n  include: [internal/**]\n",
     "repository_files": [],
     "previous_plan": null,
     "correction_feedback": null
@@ -34,7 +34,7 @@ Each task stream entry contains one `job` field with JSON:
 }
 ```
 
-`type` is `generate` or `correction`. `request_id` must equal `task_id`.
+`type` is `initial_plan` or `plan_revision`. `request_id` must equal `task_id`.
 
 ## Delivery rules
 

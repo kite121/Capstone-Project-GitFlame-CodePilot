@@ -6,6 +6,8 @@ import (
 	"strconv"
 	"strings"
 
+	"gopkg.in/yaml.v3"
+
 	"gitflame-codepilot/backend/internal/domain"
 )
 
@@ -13,7 +15,21 @@ func ParseAIConfig(raw string) (domain.AIConfig, error) {
 	if strings.TrimSpace(raw) == "" {
 		return domain.AIConfig{}, errors.New("missing .yml configuration")
 	}
+	var document any
+	if err := yaml.Unmarshal([]byte(raw), &document); err != nil {
+		return domain.AIConfig{}, fmt.Errorf("invalid YAML configuration: %w", err)
+	}
+	if _, ok := document.(map[string]any); !ok {
+		return domain.AIConfig{}, errors.New("YAML configuration must contain a mapping")
+	}
+	if containsModelSelection(document) {
+		return domain.AIConfig{}, errors.New("model selection is operator-controlled")
+	}
 	doc := parseSimpleYAML(raw)
+	retentionDays, err := strictInteger(doc, "recommendations.retention_days", 30)
+	if err != nil {
+		return domain.AIConfig{}, err
+	}
 	cfg := domain.AIConfig{
 		Raw:                raw,
 		Version:            scalar(doc, "version", "1"),
@@ -25,6 +41,7 @@ func ParseAIConfig(raw string) (domain.AIConfig, error) {
 		ExcludePatterns:    list(doc, "analysis.exclude", []string{".git/**", "node_modules/**", "dist/**", "build/**"}),
 		MaxFiles:           integer(doc, "analysis.max_files", 20),
 		MaxSnippetsPerFile: integer(doc, "analysis.max_snippets_per_file", 3),
+		RetentionDays:      retentionDays,
 		ReviewerPolicy:     scalar(doc, "code_generation.reviewer_policy", "issue_author"),
 		ApproveCommand:     scalar(doc, "code_generation.allowed_actions.approve_command", "/approve"),
 		CorrectCommand:     scalar(doc, "code_generation.allowed_actions.correct_command", "/correct"),
@@ -41,6 +58,9 @@ func ParseAIConfig(raw string) (domain.AIConfig, error) {
 	}
 	if len(cfg.IncludePatterns) == 0 {
 		return cfg, errors.New("analysis.include must contain at least one pattern")
+	}
+	if cfg.RetentionDays < 1 || cfg.RetentionDays > 365 {
+		return cfg, errors.New("recommendations.retention_days must be between 1 and 365")
 	}
 	if !cfg.RequireApproval {
 		return cfg, errors.New("code_generation.require_user_approval must be true")
@@ -63,53 +83,34 @@ type yamlDoc struct {
 
 func parseSimpleYAML(raw string) yamlDoc {
 	d := yamlDoc{map[string]string{}, map[string][]string{}}
-	var stack []string
-	current := ""
-	for _, line := range strings.Split(raw, "\n") {
-		trim := strings.TrimSpace(line)
-		if trim == "" || strings.HasPrefix(trim, "#") {
-			continue
-		}
-		indent := (len(line) - len(strings.TrimLeft(line, " "))) / 2
-		if strings.HasPrefix(trim, "- ") {
-			if current != "" {
-				d.lists[current] = append(d.lists[current], clean(strings.TrimPrefix(trim, "- ")))
-			}
-			continue
-		}
-		key, value, ok := strings.Cut(trim, ":")
-		if !ok {
-			continue
-		}
-		key = strings.TrimSpace(key)
-		value = clean(value)
-		if indent < len(stack) {
-			stack = stack[:indent]
-		}
-		for len(stack) < indent {
-			stack = append(stack, "")
-		}
-		path := strings.Join(append(append([]string{}, stack...), key), ".")
-		if value == "" {
-			if indent == len(stack) {
-				stack = append(stack, key)
-			} else {
-				stack[indent] = key
-			}
-			current = path
-		} else {
-			d.scalars[path] = value
-			current = ""
-		}
+	var root map[string]any
+	if err := yaml.Unmarshal([]byte(raw), &root); err == nil {
+		flattenYAML(d, "", root)
 	}
 	return d
 }
-func clean(v string) string {
-	v = strings.TrimSpace(v)
-	if i := strings.Index(v, " #"); i >= 0 {
-		v = v[:i]
+
+func flattenYAML(document yamlDoc, prefix string, value any) {
+	switch typed := value.(type) {
+	case map[string]any:
+		for key, nested := range typed {
+			path := key
+			if prefix != "" {
+				path = prefix + "." + key
+			}
+			flattenYAML(document, path, nested)
+		}
+	case []any:
+		values := make([]string, 0, len(typed))
+		for _, nested := range typed {
+			values = append(values, fmt.Sprint(nested))
+		}
+		document.lists[prefix] = values
+	case nil:
+		return
+	default:
+		document.scalars[prefix] = fmt.Sprint(typed)
 	}
-	return strings.Trim(strings.TrimSpace(v), `"'`)
 }
 func scalar(d yamlDoc, k, f string) string {
 	if v, ok := d.scalars[k]; ok && v != "" {
@@ -141,4 +142,39 @@ func integer(d yamlDoc, key string, fallback int) int {
 		return fallback
 	}
 	return parsed
+}
+
+func strictInteger(d yamlDoc, key string, fallback int) (int, error) {
+	value, ok := d.scalars[key]
+	if !ok {
+		return fallback, nil
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil {
+		return 0, fmt.Errorf("%s must be an integer", key)
+	}
+	return parsed, nil
+}
+
+func containsModelSelection(value any) bool {
+	switch typed := value.(type) {
+	case map[string]any:
+		for key, nested := range typed {
+			normalized := strings.ReplaceAll(strings.ToLower(key), "-", "_")
+			switch normalized {
+			case "model", "model_id", "agent_model", "llm_model":
+				return true
+			}
+			if containsModelSelection(nested) {
+				return true
+			}
+		}
+	case []any:
+		for _, nested := range typed {
+			if containsModelSelection(nested) {
+				return true
+			}
+		}
+	}
+	return false
 }

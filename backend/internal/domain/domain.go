@@ -8,11 +8,13 @@ const (
 	TaskCompleted  = "completed"
 	TaskFailed     = "failed"
 
-	SessionGenerating          = "generating"
+	SessionGenerating          = "queued"
+	SessionProcessing          = "processing"
 	SessionPlanGenerated       = "plan_generated"
 	SessionApproved            = "approved"
 	SessionCorrectionRequested = "correction_requested"
 	SessionRejected            = "rejected"
+	SessionFailed              = "failed"
 )
 
 type RepositoryMetadata struct {
@@ -50,6 +52,7 @@ type AIConfig struct {
 	AnalysisEnabled, RequireApproval                bool
 	IncludePatterns, ExcludePatterns                []string
 	MaxFiles, MaxSnippetsPerFile                    int
+	RetentionDays                                   int
 	ReviewerPolicy                                  string
 	ApproveCommand, CorrectCommand, RejectCommand   string
 }
@@ -66,6 +69,7 @@ type IssueSession struct {
 
 type AgentTask struct {
 	ID, SessionID, IssueID, Type, Status string
+	GeneratedPlanID                      string
 	Attempt                              int
 	PlanMarkdown                         string
 	Error                                *TaskError
@@ -91,13 +95,13 @@ type TaskError struct {
 }
 
 type AgentPlanRequest struct {
-	RequestID          string             `json:"request_id"`
-	Issue              AgentIssue         `json:"issue"`
-	Repository         AgentRepository    `json:"repository"`
-	Configuration      AgentConfiguration `json:"configuration"`
-	RepositoryFiles    []RepositoryFile   `json:"repository_files"`
-	PreviousPlan       *string            `json:"previous_plan"`
-	CorrectionFeedback *string            `json:"correction_feedback"`
+	RequestID          string           `json:"request_id"`
+	Issue              AgentIssue       `json:"issue"`
+	Repository         AgentRepository  `json:"repository"`
+	ConfigurationYAML  string           `json:"configuration_yaml"`
+	RepositoryFiles    []RepositoryFile `json:"repository_files"`
+	PreviousPlan       *string          `json:"previous_plan"`
+	CorrectionFeedback *string          `json:"correction_feedback"`
 }
 
 type AgentPlanResponse struct {
@@ -121,22 +125,19 @@ type AgentRepository struct {
 	CommitSHA     string `json:"commit_sha"`
 }
 
-type AgentConfiguration struct {
-	Include            []string `json:"include"`
-	Exclude            []string `json:"exclude"`
-	MaxFiles           int      `json:"max_files"`
-	MaxSnippetsPerFile int      `json:"max_snippets_per_file"`
-}
-
 type RelevantFile struct {
 	Path   string `json:"path"`
 	Reason string `json:"reason"`
+	Create bool   `json:"create"`
 }
 
 type AgentUsage struct {
-	PromptTokens     int `json:"prompt_tokens"`
-	CompletionTokens int `json:"completion_tokens"`
-	ToolCalls        int `json:"tool_calls"`
+	PromptTokens          int     `json:"prompt_tokens"`
+	CompletionTokens      int     `json:"completion_tokens"`
+	TotalTokens           int     `json:"total_tokens"`
+	ToolCalls             int     `json:"tool_calls"`
+	ReasoningChars        int     `json:"reasoning_chars"`
+	GenerationTimeSeconds float64 `json:"generation_time_seconds"`
 }
 
 type GeneratedFilesContract struct {

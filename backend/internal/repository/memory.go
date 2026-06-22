@@ -18,7 +18,7 @@ type Store interface {
 	Task(string) (*domain.AgentTask, error)
 	LatestTask(string) (*domain.AgentTask, error)
 	UpdateTask(*domain.AgentTask) error
-	SaveRecommendations(string, string, []domain.RecommendationCard) (*domain.RecommendationReport, error)
+	SaveRecommendations(domain.RepositoryMetadata, domain.AIConfig, string, []domain.RecommendationCard) (*domain.RecommendationReport, error)
 	Recommendations(string) (*domain.RecommendationReport, error)
 	CloseRecommendation(string) (domain.RecommendationCard, error)
 	DeleteRecommendation(string) error
@@ -116,11 +116,11 @@ func (s *MemoryStore) UpdateTask(v *domain.AgentTask) error {
 	return nil
 }
 
-func (s *MemoryStore) SaveRecommendations(id, summary string, cards []domain.RecommendationCard) (*domain.RecommendationReport, error) {
+func (s *MemoryStore) SaveRecommendations(repository domain.RepositoryMetadata, _ domain.AIConfig, summary string, cards []domain.RecommendationCard) (*domain.RecommendationReport, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	v := &domain.RecommendationReport{RepositoryID: id, Summary: summary, Status: "ready", Recommendations: append([]domain.RecommendationCard(nil), cards...)}
-	s.reports[id] = v
+	v := &domain.RecommendationReport{RepositoryID: repository.ID, Summary: summary, Status: "ready", Recommendations: append([]domain.RecommendationCard(nil), cards...)}
+	s.reports[repository.ID] = v
 	return cloneReport(v), nil
 }
 func (s *MemoryStore) Recommendations(id string) (*domain.RecommendationReport, error) {

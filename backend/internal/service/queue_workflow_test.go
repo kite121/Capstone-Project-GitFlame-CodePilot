@@ -40,7 +40,7 @@ func TestAnalyzeIsIdempotentAndPublishesOneJob(t *testing.T) {
 		t.Fatalf("published %d jobs, want 1", len(broker.jobs))
 	}
 	job := broker.jobs[0]
-	if job.TaskID != firstTask.ID || job.Request.RequestID != firstTask.ID || job.Request.Configuration.MaxFiles != 20 {
+	if job.TaskID != firstTask.ID || job.Request.RequestID != firstTask.ID || job.Request.ConfigurationYAML != "version: 1" {
 		t.Fatalf("unexpected job: %+v", job)
 	}
 }

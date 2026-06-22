@@ -34,7 +34,7 @@ validated plan.md
       +---- reject  -> rejected state
 ```
 
-The Agent Engine client accepts configuration through `AGENT_ENGINE_URL` and `AGENT_ENGINE_TIMEOUT_SECONDS`. Its request now matches the shared Agent Engine architecture document: `request_id`, `issue`, `repository`, parsed `configuration`, `repository_files`, `previous_plan`, and `correction_feedback`. The completed task exposes relevant files, model ID, usage, and a short tool-execution summary without model reasoning.
+The Agent Engine client accepts configuration through `AGENT_ENGINE_URL` and `AGENT_ENGINE_TIMEOUT_SECONDS`. Its request matches the implemented Python service: `request_id`, `issue`, `repository`, raw `configuration_yaml`, `repository_files`, `previous_plan`, and `correction_feedback`. The completed task exposes relevant files, model ID, bounded usage metrics, and a short tool-execution summary without model reasoning.
 
 Supported downstream errors `400`, `404`, `422`, `502`, `503`, and `504` are preserved in the failed task payload. Connection errors become `502`; timeouts become `504`.
 

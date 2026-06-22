@@ -49,7 +49,7 @@ func (w *Workflow) Analyze(req domain.IssueAnalyzeRequest) (*domain.IssueSession
 			return nil, nil, err
 		}
 	}
-	task, err := w.store.CreateTask(session.ID, req.Issue.ID, "generate")
+	task, err := w.store.CreateTask(session.ID, req.Issue.ID, "initial_plan")
 	if err != nil {
 		return nil, nil, err
 	}
@@ -76,7 +76,7 @@ func (w *Workflow) Correct(issueID, feedback string) (*domain.AgentTask, error) 
 	if err := w.store.UpdateSession(session); err != nil {
 		return nil, err
 	}
-	task, err := w.store.CreateTask(session.ID, session.Request.Issue.ID, "correction")
+	task, err := w.store.CreateTask(session.ID, session.Request.Issue.ID, "plan_revision")
 	if err != nil {
 		return nil, err
 	}
@@ -93,7 +93,7 @@ func (w *Workflow) Retry(taskID string) (*domain.AgentTask, error) {
 	if err != nil {
 		return nil, err
 	}
-	if failed.Status != domain.TaskFailed || failed.Error == nil || !recoverableStatus(failed.Error.HTTPStatus) {
+	if failed.Status != domain.TaskFailed || failed.Error == nil || !recoverableTaskError(failed.Error) {
 		return nil, errors.New("only failed tasks with a temporary Agent Engine error can be retried")
 	}
 	session, err := w.store.Session(failed.SessionID)
@@ -104,8 +104,16 @@ func (w *Workflow) Retry(taskID string) (*domain.AgentTask, error) {
 	if err != nil {
 		return nil, err
 	}
+	task.Attempt = failed.Attempt + 1
+	if err := w.store.UpdateTask(task); err != nil {
+		return nil, err
+	}
+	session.Status = domain.SessionGenerating
+	if err := w.store.UpdateSession(session); err != nil {
+		return nil, err
+	}
 	var previousPlan, feedback *string
-	if failed.Type == "correction" {
+	if failed.Type == "plan_revision" {
 		previous := session.PlanMarkdown
 		previousPlan = &previous
 		if len(session.FeedbackHistory) > 0 {
@@ -113,7 +121,7 @@ func (w *Workflow) Retry(taskID string) (*domain.AgentTask, error) {
 			feedback = &value
 		}
 	}
-	job := domain.AgentJob{TaskID: task.ID, SessionID: session.ID, Type: task.Type, Attempt: 1, Request: agentRequest(task.ID, session, previousPlan, feedback)}
+	job := domain.AgentJob{TaskID: task.ID, SessionID: session.ID, Type: task.Type, Attempt: task.Attempt, Request: agentRequest(task.ID, session, previousPlan, feedback)}
 	if err := w.dispatch(job); err != nil {
 		return nil, err
 	}
@@ -149,12 +157,24 @@ func (w *Workflow) ExecuteTask(ctx context.Context, job domain.AgentJob) error {
 	if err := w.store.UpdateTask(task); err != nil {
 		return err
 	}
+	session, err := w.store.Session(task.SessionID)
+	if err != nil {
+		return err
+	}
+	session.Status = domain.SessionProcessing
+	if err := w.store.UpdateSession(session); err != nil {
+		return err
+	}
 	result, err := w.generator.GeneratePlan(ctx, job.Request)
 	if err != nil {
 		_ = w.failTask(job.TaskID, err)
 		return err
 	}
-	if err := ValidatePlan(result.PlanMarkdown, job.Request.RepositoryFiles); err != nil {
+	validationFiles := append([]domain.RepositoryFile(nil), job.Request.RepositoryFiles...)
+	for _, relevant := range result.RelevantFiles {
+		validationFiles = append(validationFiles, domain.RepositoryFile{Path: relevant.Path})
+	}
+	if err := ValidatePlan(result.PlanMarkdown, validationFiles); err != nil {
 		invalid := &agent.Error{Status: http.StatusUnprocessableEntity, Code: "invalid_output", Detail: err.Error()}
 		_ = w.failTask(job.TaskID, invalid)
 		return invalid
@@ -164,11 +184,15 @@ func (w *Workflow) ExecuteTask(ctx context.Context, job domain.AgentJob) error {
 	task.RelevantFiles = result.RelevantFiles
 	task.Model = result.Model
 	task.Usage = result.Usage
-	task.ToolExecutionSummary = fmt.Sprintf("model=%s; tool_calls=%d; prompt_tokens=%d; completion_tokens=%d", result.Model, result.Usage.ToolCalls, result.Usage.PromptTokens, result.Usage.CompletionTokens)
+	task.ToolExecutionSummary = fmt.Sprintf(
+		"model=%s; tool_calls=%d; prompt_tokens=%d; completion_tokens=%d; total_tokens=%d; reasoning_chars=%d; generation_seconds=%.3f",
+		result.Model, result.Usage.ToolCalls, result.Usage.PromptTokens, result.Usage.CompletionTokens,
+		result.Usage.TotalTokens, result.Usage.ReasoningChars, result.Usage.GenerationTimeSeconds,
+	)
 	if err := w.store.UpdateTask(task); err != nil {
 		return err
 	}
-	session, err := w.store.Session(task.SessionID)
+	session, err = w.store.Session(task.SessionID)
 	if err != nil {
 		return err
 	}
@@ -185,7 +209,15 @@ func (w *Workflow) RetryTask(job domain.AgentJob) error {
 	}
 	task.Status = domain.TaskQueued
 	task.Attempt = job.Attempt
-	return w.store.UpdateTask(task)
+	if err := w.store.UpdateTask(task); err != nil {
+		return err
+	}
+	session, err := w.store.Session(task.SessionID)
+	if err != nil {
+		return err
+	}
+	session.Status = domain.SessionGenerating
+	return w.store.UpdateSession(session)
 }
 
 func (w *Workflow) failTask(taskID string, cause error) error {
@@ -199,8 +231,8 @@ func (w *Workflow) failTask(taskID string, cause error) error {
 		return err
 	}
 	session, err := w.store.Session(task.SessionID)
-	if err == nil && task.Type == "correction" {
-		session.Status = domain.SessionPlanGenerated
+	if err == nil {
+		session.Status = domain.SessionFailed
 		_ = w.store.UpdateSession(session)
 	}
 	return nil
@@ -254,11 +286,11 @@ func agentRequest(taskID string, session *domain.IssueSession, previousPlan, fee
 		}
 	}
 	return domain.AgentPlanRequest{
-		RequestID:       taskID,
-		Issue:           domain.AgentIssue{ID: session.Request.Issue.ID, Title: session.Request.Issue.Title, Body: session.Request.Issue.Body},
-		Repository:      domain.AgentRepository{ID: session.Request.Repository.ID, DefaultBranch: session.Request.Repository.DefaultBranch, CommitSHA: session.Request.Repository.CommitSHA},
-		Configuration:   domain.AgentConfiguration{Include: append([]string(nil), session.Config.IncludePatterns...), Exclude: append([]string(nil), session.Config.ExcludePatterns...), MaxFiles: session.Config.MaxFiles, MaxSnippetsPerFile: session.Config.MaxSnippetsPerFile},
-		RepositoryFiles: files, PreviousPlan: previousPlan, CorrectionFeedback: feedback,
+		RequestID:         taskID,
+		Issue:             domain.AgentIssue{ID: session.Request.Issue.ID, Title: session.Request.Issue.Title, Body: session.Request.Issue.Body},
+		Repository:        domain.AgentRepository{ID: session.Request.Repository.ID, DefaultBranch: session.Request.Repository.DefaultBranch, CommitSHA: session.Request.Repository.CommitSHA},
+		ConfigurationYAML: session.Config.Raw,
+		RepositoryFiles:   files, PreviousPlan: previousPlan, CorrectionFeedback: feedback,
 	}
 }
 
@@ -278,20 +310,36 @@ func ValidateAnalyze(v domain.IssueAnalyzeRequest) error {
 		return errors.New("issue.author is required")
 	case len(v.RepositoryFiles) == 0 && len(v.RepositoryContext) == 0:
 		return errors.New("repository_files must contain at least one file")
-	case len(v.RepositoryFiles) > 0 && hasInvalidRepositoryFile(v.RepositoryFiles):
-		return errors.New("each repository_files item requires a non-empty path")
 	default:
-		return nil
+		files := v.RepositoryFiles
+		if len(files) == 0 {
+			for _, legacyPath := range v.RepositoryContext {
+				files = append(files, domain.RepositoryFile{Path: legacyPath})
+			}
+		}
+		return validateRepositoryFiles(files)
 	}
 }
 
-func hasInvalidRepositoryFile(files []domain.RepositoryFile) bool {
-	for _, file := range files {
-		if strings.TrimSpace(file.Path) == "" {
-			return true
-		}
+func validateRepositoryFiles(files []domain.RepositoryFile) error {
+	if len(files) > 2_000 {
+		return errors.New("repository_files cannot contain more than 2000 files")
 	}
-	return false
+	seen := make(map[string]struct{}, len(files))
+	for _, file := range files {
+		normalized := normalizePlanPath(file.Path)
+		if strings.TrimSpace(file.Path) == "" || !safePlanPath(normalized) {
+			return fmt.Errorf("repository_files contains unsafe path %q", file.Path)
+		}
+		if len(file.Content) > 500_000 {
+			return fmt.Errorf("repository file %q exceeds 500000 characters", normalized)
+		}
+		if _, exists := seen[normalized]; exists {
+			return fmt.Errorf("repository_files contains duplicate path %q", normalized)
+		}
+		seen[normalized] = struct{}{}
+	}
+	return nil
 }
 
 func toTaskError(err error) *domain.TaskError {
@@ -302,8 +350,12 @@ func toTaskError(err error) *domain.TaskError {
 	return &domain.TaskError{HTTPStatus: http.StatusBadGateway, Code: "agent_engine_error", Detail: err.Error()}
 }
 
-func recoverableStatus(status int) bool {
-	return status == http.StatusBadGateway || status == http.StatusServiceUnavailable || status == http.StatusGatewayTimeout
+func recoverableTaskError(taskError *domain.TaskError) bool {
+	if taskError.HTTPStatus == http.StatusServiceUnavailable || taskError.HTTPStatus == http.StatusGatewayTimeout {
+		return true
+	}
+	return taskError.HTTPStatus == http.StatusBadGateway &&
+		(taskError.Code == "agent_engine_unreachable" || taskError.Code == "agent_engine_error")
 }
 
 var ErrDispatch = errors.New("task dispatch failed")

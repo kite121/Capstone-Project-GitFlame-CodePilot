@@ -19,14 +19,14 @@ func TestPostgresIssueTaskPersistence(t *testing.T) {
 	}
 	defer store.Close()
 	req := domain.IssueAnalyzeRequest{Repository: domain.RepositoryMetadata{ID: "integration-repo", DefaultBranch: "main"}, Issue: domain.IssuePayload{ID: NewID(), Title: "Persistence test", Body: "Verify task persistence", Author: "test"}, YAMLConfig: "version: 1", RepositoryFiles: []domain.RepositoryFile{{Path: "main.go", Content: "package main"}}}
-	session, created, err := store.CreateSession(req, domain.AIConfig{Raw: "version: 1", Version: "1"})
+	session, created, err := store.CreateSession(req, domain.AIConfig{Raw: "version: 1", Version: "1", RetentionDays: 30})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !created {
 		t.Fatal("expected new session")
 	}
-	task, err := store.CreateTask(session.ID, req.Issue.ID, "generate")
+	task, err := store.CreateTask(session.ID, req.Issue.ID, "initial_plan")
 	if err != nil {
 		t.Fatal(err)
 	}

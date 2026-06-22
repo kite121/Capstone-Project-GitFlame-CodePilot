@@ -110,7 +110,8 @@ func temporary(err error) bool {
 	if !errors.As(err, &engineError) {
 		return false
 	}
-	return engineError.Status == http.StatusBadGateway ||
+	return (engineError.Status == http.StatusBadGateway &&
+		(engineError.Code == "agent_engine_unreachable" || engineError.Code == "agent_engine_error")) ||
 		engineError.Status == http.StatusServiceUnavailable ||
 		engineError.Status == http.StatusGatewayTimeout
 }

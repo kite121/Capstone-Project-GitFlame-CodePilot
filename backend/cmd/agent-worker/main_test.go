@@ -45,7 +45,7 @@ func TestProcessRetriesTemporaryFailure(t *testing.T) {
 func TestProcessDeadLettersPermanentFailure(t *testing.T) {
 	broker := &fakeBroker{}
 	message := queue.Message{ID: "2-0", Job: domain.AgentJob{TaskID: "task", Attempt: 1}}
-	process(context.Background(), fakeExecutor{err: &agent.Error{Status: 422, Code: "invalid_output", Detail: "bad plan"}}, broker, message, 3)
+	process(context.Background(), fakeExecutor{err: &agent.Error{Status: 502, Code: "invalid_output", Detail: "bad plan"}}, broker, message, 3)
 	if broker.dead != 1 || len(broker.acked) != 1 || len(broker.published) != 0 {
 		t.Fatalf("unexpected broker state: %+v", broker)
 	}

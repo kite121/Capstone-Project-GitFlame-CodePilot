@@ -25,7 +25,7 @@ func TestRedisStreamLifecycle(t *testing.T) {
 	if err := broker.EnsureGroup(ctx); err != nil {
 		t.Fatal(err)
 	}
-	job := domain.AgentJob{TaskID: "task-1", SessionID: "session-1", Type: "generate", Attempt: 1, Request: domain.AgentPlanRequest{RequestID: "task-1"}}
+	job := domain.AgentJob{TaskID: "task-1", SessionID: "session-1", Type: "initial_plan", Attempt: 1, Request: domain.AgentPlanRequest{RequestID: "task-1"}}
 	if err := broker.Publish(ctx, job); err != nil {
 		t.Fatal(err)
 	}

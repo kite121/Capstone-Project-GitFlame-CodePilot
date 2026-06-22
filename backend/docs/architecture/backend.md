@@ -33,6 +33,6 @@ internal/httpapi --> internal/service --> internal/agent
 6. A correction creates another task and sends `previous_plan` plus `correction_feedback`.
 7. Approval changes workflow state and returns a contract for future code generation. It does not create a branch or pull request in Sprint 2.
 
-The Agent Engine request follows the agreed Sprint 2 contract: `request_id`, issue data, repository revision, parsed `configuration`, `repository_files`, and nullable correction fields. The response metadata includes relevant files, model ID, token usage, and tool-call count.
+The Agent Engine request follows the implemented Sprint 2 contract: `request_id`, issue data, repository revision, raw validated `configuration_yaml`, `repository_files`, and nullable correction fields. The response metadata includes relevant files, model ID, token usage, tool-call count, reasoning character count, and generation time.
 
 The Redis worker uses a consumer group, concurrency `1`, bounded retries for temporary Agent Engine errors, and a dead-letter stream for permanent failures. PostgreSQL is authoritative; Redis is only the transport. Local mode remains available for tests and development without Redis.

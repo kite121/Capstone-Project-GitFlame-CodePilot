@@ -251,13 +251,14 @@ func (s *Server) analyzeRecommendations(w http.ResponseWriter, r *http.Request) 
 		problem(w, 422, "validation_error", "path repository id must match payload repository id")
 		return
 	}
-	if _, err := service.ParseAIConfig(req.YAMLConfig); err != nil {
+	cfg, err := service.ParseAIConfig(req.YAMLConfig)
+	if err != nil {
 		problem(w, 422, "validation_error", err.Error())
 		return
 	}
 	confidence := .72
 	cards := []domain.RecommendationCard{{ID: repository.NewID(), Severity: "low", File: "README.md", Problem: "Project setup documentation is minimal.", Suggestion: "Document Sprint 2 Agent Engine configuration.", Confidence: &confidence, State: "open"}}
-	report, err := s.store.SaveRecommendations(req.Repository.ID, "Local recommendation fallback completed.", cards)
+	report, err := s.store.SaveRecommendations(req.Repository, cfg, "Local recommendation fallback completed.", cards)
 	if err != nil {
 		problem(w, 500, "storage_error", err.Error())
 		return

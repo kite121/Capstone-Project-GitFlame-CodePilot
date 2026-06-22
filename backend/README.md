@@ -1,6 +1,6 @@
 # Backend
 
-The backend service exposes GitFlame integration endpoints, validates repository configuration, stores workflow state, and communicates with the ML service.
+The backend service exposes GitFlame integration endpoints, validates repository configuration, stores workflow state, and communicates with Agent Engine.
 
 Current Sprint 2 Go backend includes:
 
@@ -32,7 +32,6 @@ Current Sprint 2 Go backend includes:
 - Redis Streams broker with consumer groups, retry, queue limit, acknowledgement, and dead-letter handling
 - standalone `cmd/agent-worker` with concurrency `1`
 - `.yml` config service for branch prefix, include/exclude patterns, approval commands, and reviewer policy
-- mock Git workflow service interface with branch, PR URL, reviewer, and provider response
 
 ## Run locally
 
@@ -51,7 +50,8 @@ http://localhost:8000/swagger/
 From the repository root:
 
 ```bash
-docker compose up --build
+docker compose -f docker-compose.yml \
+  -f backend/deploy/docker-compose.sprint2.override.yml up --build
 ```
 
 The frontend is exposed on port `80`, and the backend remains available on port `8000`:
@@ -65,18 +65,25 @@ The backend receives:
 
 ```text
 AGENT_ENGINE_URL=http://agent-engine:8001
-AGENT_ENGINE_TIMEOUT_SECONDS=120
+AGENT_ENGINE_TIMEOUT_SECONDS=600
 REDIS_URL=redis://redis:6379/0
 AGENT_QUEUE_NAME=gitflame:agent:tasks
 DATABASE_URL=postgresql://gitflame:gitflame@database:5432/gitflame_codepilot
+AGENT_MODEL=Qwen/Qwen3-Coder-30B-A3B-Instruct
+OPENAI_BASE_URL=http://host.docker.internal:9000/v1
 ```
+
+Compose exposes Agent Engine itself on host port `8002`, while containers use
+`http://agent-engine:8001`. `OPENAI_BASE_URL` must point to a running OpenAI-compatible model
+server and `OPENAI_API_KEY` must be set when that provider requires authentication.
 
 `REDIS_URL` matches the Compose Redis service (`redis://redis:6379/0`); host-side tools use `redis://localhost:6379/0`. Redis transports tasks, while PostgreSQL remains the source of truth. Set `TASK_DISPATCH_MODE=redis` only when the `agent-worker` service is running. The default `local` mode is convenient for isolated backend development.
 
 PostgreSQL schema can be applied manually:
 
 ```bash
-psql postgresql://gitflame:gitflame@localhost:5432/gitflame_codepilot -f backend/db/schema.sql
+psql postgresql://gitflame:gitflame@localhost:5432/gitflame_codepilot \
+  -f backend/db/migrations/initial_schema.sql
 ```
 
 ## Build
@@ -89,7 +96,10 @@ go build ./cmd/agent-worker
 Run the Redis worker:
 
 ```bash
-TASK_DISPATCH_MODE=redis go run ./cmd/agent-worker
+DATABASE_URL=postgresql://gitflame:gitflame@localhost:5432/gitflame_codepilot \
+REDIS_URL=redis://localhost:6379/0 \
+AGENT_ENGINE_URL=http://localhost:8002 \
+go run ./cmd/agent-worker
 ```
 
 To extend the supplied root Compose file with the worker and queue-mode settings:
