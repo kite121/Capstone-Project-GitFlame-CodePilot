@@ -236,6 +236,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -243,16 +244,27 @@ import (
 
 type Server struct {
 	cfg         Config
-	store       *MemoryStore
+	store       Store
 	ml          *MLClient
 	gitWorkflow GitWorkflowService
 	router      *http.ServeMux
 }
 
-func NewServer(cfg Config) *Server {
+func NewServer(cfg Config) (*Server, error) {
+	if strings.TrimSpace(cfg.DatabaseURL) == "" {
+		return nil, errors.New("DATABASE_URL is required")
+	}
+	store, err := NewPostgresStore(cfg.DatabaseURL)
+	if err != nil {
+		return nil, fmt.Errorf("connect PostgreSQL storage: %w", err)
+	}
+	return NewServerWithStore(cfg, store), nil
+}
+
+func NewServerWithStore(cfg Config, store Store) *Server {
 	server := &Server{
 		cfg:         cfg,
-		store:       NewMemoryStore(),
+		store:       store,
 		ml:          NewMLClient(cfg.MLServiceURL),
 		gitWorkflow: NewMockGitWorkflowService(),
 	}
@@ -269,6 +281,10 @@ func NewServer(cfg Config) *Server {
 	mux.HandleFunc("/recommendations/", server.handleRecommendationMutation)
 	server.router = mux
 	return server
+}
+
+func (s *Server) Close() {
+	s.store.Close()
 }
 
 func (s *Server) Router() http.Handler {
@@ -333,7 +349,11 @@ func (s *Server) handleAnalyzeIssue(w http.ResponseWriter, r *http.Request) {
 		planMarkdown = fallbackIssuePlan(payload)
 	}
 
-	session := s.store.SaveIssueSession(payload, cfg, planMarkdown)
+	session, err := s.store.SaveIssueSession(r.Context(), payload, cfg, planMarkdown)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	actions := nextActions(cfg)
 	writeJSON(w, http.StatusOK, IssueAnalyzeResponse{
 		SessionID:    session.SessionID,
@@ -360,20 +380,24 @@ func (s *Server) handleIssueWorkflow(w http.ResponseWriter, r *http.Request) {
 
 	switch {
 	case r.Method == http.MethodGet && action == "plan":
-		s.handleGetIssuePlan(w, issueID)
+		s.handleGetIssuePlan(w, r, issueID)
 	case r.Method == http.MethodPost && action == "approve":
-		s.handleApproveIssue(w, issueID)
+		s.handleApproveIssue(w, r, issueID)
 	case r.Method == http.MethodPost && action == "correct":
 		s.handleCorrectIssue(w, r, issueID)
 	case r.Method == http.MethodPost && action == "reject":
-		s.handleRejectIssue(w, issueID)
+		s.handleRejectIssue(w, r, issueID)
 	default:
 		writeError(w, http.StatusNotFound, "issue workflow route was not found")
 	}
 }
 
-func (s *Server) handleGetIssuePlan(w http.ResponseWriter, issueID string) {
-	session, ok := s.store.GetIssueSession(issueID)
+func (s *Server) handleGetIssuePlan(w http.ResponseWriter, r *http.Request, issueID string) {
+	session, ok, err := s.store.GetIssueSession(r.Context(), issueID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	if !ok {
 		writeError(w, http.StatusNotFound, "issue session was not found")
 		return
@@ -390,8 +414,12 @@ func (s *Server) handleGetIssuePlan(w http.ResponseWriter, issueID string) {
 	})
 }
 
-func (s *Server) handleApproveIssue(w http.ResponseWriter, issueID string) {
-	session, ok := s.store.GetIssueSession(issueID)
+func (s *Server) handleApproveIssue(w http.ResponseWriter, r *http.Request, issueID string) {
+	session, ok, err := s.store.GetIssueSession(r.Context(), issueID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	if !ok {
 		writeError(w, http.StatusNotFound, "issue session was not found")
 		return
@@ -408,7 +436,10 @@ func (s *Server) handleApproveIssue(w http.ResponseWriter, issueID string) {
 	workflow := workflowContract.Response
 	session.Status = statusApproved
 	session.GitWorkflow = &workflow
-	s.store.UpdateIssueSession(session)
+	if _, err := s.store.UpdateIssueSession(r.Context(), session); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	writeJSON(w, http.StatusOK, PlanActionResponse{
 		SessionID:   session.SessionID,
 		IssueID:     session.Request.Issue.ID,
@@ -419,7 +450,11 @@ func (s *Server) handleApproveIssue(w http.ResponseWriter, issueID string) {
 }
 
 func (s *Server) handleCorrectIssue(w http.ResponseWriter, r *http.Request, issueID string) {
-	session, ok := s.store.GetIssueSession(issueID)
+	session, ok, err := s.store.GetIssueSession(r.Context(), issueID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	if !ok {
 		writeError(w, http.StatusNotFound, "issue session was not found")
 		return
@@ -437,7 +472,10 @@ func (s *Server) handleCorrectIssue(w http.ResponseWriter, r *http.Request, issu
 	session.Revision++
 	session.Status = statusCorrectionRequested
 	session.PlanMarkdown = session.PlanMarkdown + "\n\n## Revision feedback\n- " + payload.Feedback + "\n- Update implementation steps before approval.\n"
-	s.store.UpdateIssueSession(session)
+	if _, err := s.store.UpdateIssueSession(r.Context(), session); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	writeJSON(w, http.StatusOK, PlanActionResponse{
 		SessionID:    session.SessionID,
 		IssueID:      session.Request.Issue.ID,
@@ -447,14 +485,21 @@ func (s *Server) handleCorrectIssue(w http.ResponseWriter, r *http.Request, issu
 	})
 }
 
-func (s *Server) handleRejectIssue(w http.ResponseWriter, issueID string) {
-	session, ok := s.store.GetIssueSession(issueID)
+func (s *Server) handleRejectIssue(w http.ResponseWriter, r *http.Request, issueID string) {
+	session, ok, err := s.store.GetIssueSession(r.Context(), issueID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	if !ok {
 		writeError(w, http.StatusNotFound, "issue session was not found")
 		return
 	}
 	session.Status = statusRejected
-	s.store.UpdateIssueSession(session)
+	if _, err := s.store.UpdateIssueSession(r.Context(), session); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	writeJSON(w, http.StatusOK, PlanActionResponse{
 		SessionID: session.SessionID,
 		IssueID:   session.Request.Issue.ID,
@@ -485,7 +530,8 @@ func (s *Server) handleRecommendationAnalyze(w http.ResponseWriter, r *http.Requ
 		writeError(w, http.StatusUnprocessableEntity, "path repository id must match payload repository id")
 		return
 	}
-	if _, err := ParseAIConfig(payload.YAMLConfig); err != nil {
+	cfg, err := ParseAIConfig(payload.YAMLConfig)
+	if err != nil {
 		writeError(w, http.StatusUnprocessableEntity, err.Error())
 		return
 	}
@@ -494,7 +540,11 @@ func (s *Server) handleRecommendationAnalyze(w http.ResponseWriter, r *http.Requ
 	if err != nil {
 		summary, cards = fallbackRecommendations()
 	}
-	report := s.store.SaveRecommendations(repositoryID, summary, cards)
+	report, err := s.store.SaveRecommendations(r.Context(), payload, cfg, summary, cards)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	writeJSON(w, http.StatusOK, RecommendationAnalyzeResponse{
 		RepositoryID:    report.RepositoryID,
 		Status:          report.Status,
@@ -518,7 +568,11 @@ func (s *Server) handleRepositoryRecommendations(w http.ResponseWriter, r *http.
 		writeError(w, http.StatusNotFound, "repository recommendation route was not found")
 		return
 	}
-	report, ok := s.store.GetRecommendationReport(repositoryID)
+	report, ok, err := s.store.GetRecommendationReport(r.Context(), repositoryID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	if !ok {
 		writeError(w, http.StatusNotFound, "recommendation report was not found for repository")
 		return
@@ -559,7 +613,12 @@ func (s *Server) handleRecommendationMutation(w http.ResponseWriter, r *http.Req
 	rest := strings.TrimPrefix(r.URL.Path, "/recommendations/")
 	recommendationID, action, ok := strings.Cut(rest, "/")
 	if !ok && r.Method == http.MethodDelete {
-		if s.store.DeleteRecommendation(rest) {
+		deleted, err := s.store.DeleteRecommendation(r.Context(), rest)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if deleted {
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
@@ -570,7 +629,11 @@ func (s *Server) handleRecommendationMutation(w http.ResponseWriter, r *http.Req
 		writeError(w, http.StatusNotFound, "recommendation route was not found")
 		return
 	}
-	card, found := s.store.CloseRecommendation(recommendationID)
+	card, found, err := s.store.CloseRecommendation(r.Context(), recommendationID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	if !found {
 		writeError(w, http.StatusNotFound, "recommendation was not found")
 		return

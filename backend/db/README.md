@@ -1,42 +1,58 @@
 # Backend Database
 
-PostgreSQL is the authoritative Sprint 2 workflow store.
+The backend uses PostgreSQL as the main storage layer for Sprint 2. Runtime state is no longer expected to live only in `MemoryStore`.
 
 ## Files
 
-- `migrations/initial_schema.sql` - complete schema from the latest database branch, extended with the bounded Agent Engine metadata required by the worker.
-- `migrations/002_backend_agent_integration.sql` - adds only backend/worker integration columns to an existing Sprint 2 database.
-- `schema.sql` - compatibility copy of the complete schema for older Compose configurations.
-- `verification.sql` - sample persistence and verification queries supplied by the database workstream.
+- `migrations/initial_schema.sql` creates the PostgreSQL schema.
+- `verification.sql` inserts sample data and checks that issue workflow state, plan revisions, agent task status, and recommendation retention are stored correctly.
 
-The schema stores repositories, validated configuration, issue sessions, current generated plans,
-plan revisions, correction feedback, agent task states, user responses, recommendations, and
-recommendation retention.
+## Schema Scope
 
-## Fresh database
+The migration creates:
 
-The latest root Compose mounts `migrations/initial_schema.sql` into PostgreSQL initialization.
-For a manual setup:
+- `repositories`
+- `ai_configs`
+- `issue_sessions`
+- `generated_plans`
+- `plan_revisions`
+- `agent_tasks`
+- `agent_task_statuses`
+- `user_responses`
+- `recommendation_runs`
+- `recommendations`
+- `recommendation_statuses`
 
-```bash
-psql "$DATABASE_URL" -f backend/db/migrations/initial_schema.sql
+`issue_sessions` stores the GitFlame issue workflow state. `generated_plans` stores the current plan for a session. `plan_revisions` stores the plan history, including correction feedback. `agent_tasks` stores the current Agent Engine task status, while `agent_task_statuses` stores the transition history for `queued`, `processing`, `completed`, and `failed`.
+
+Recommendation retention is stored on `recommendation_runs` with `retention_days` and `expires_at`. The backend takes `retention_days` from the validated `.yml` configuration; it is not chosen by the database.
+
+## Docker Initialization
+
+`docker-compose.yml` mounts the migration into the PostgreSQL container:
+
+```yaml
+./backend/db/migrations/initial_schema.sql:/docker-entrypoint-initdb.d/initial_schema.sql:ro
 ```
 
-## Existing Sprint 2 database
+PostgreSQL applies this file when a new database volume is created.
 
-If Amir's `initial_schema.sql` was already applied before the backend integration columns were
-added, run:
-
-```bash
-psql "$DATABASE_URL" -f backend/db/migrations/002_backend_agent_integration.sql
-```
-
-The old Sprint 1 schema is not structurally equivalent. Use the complete initial schema for a new
-development database instead of applying only migration `002` to Sprint 1 tables.
-
-## Integration test
+If the `postgres_data` volume already exists, PostgreSQL will not re-run the initialization file automatically. For a clean local database, recreate the volume:
 
 ```bash
-TEST_DATABASE_URL="$DATABASE_URL" \
-go test ./internal/repository -run TestPostgresIssueTaskPersistence -count=1
+docker compose down -v
+docker compose up --build
 ```
+
+## Manual Verification
+
+After the database is running, run:
+
+```bash
+psql postgresql://gitflame:gitflame@localhost:5432/gitflame_codepilot -f backend/db/verification.sql
+```
+
+Expected result:
+
+- the issue workflow query returns a saved issue session, generated plan, revision, and completed agent task;
+- the recommendation query returns a saved retention period and a future expiration timestamp.

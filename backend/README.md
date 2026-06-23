@@ -36,6 +36,7 @@ Current Sprint 2 Go backend includes:
 ## Run locally
 
 ```bash
+set DATABASE_URL=postgresql://gitflame:gitflame@localhost:5432/gitflame_codepilot
 go run ./cmd/server
 ```
 
