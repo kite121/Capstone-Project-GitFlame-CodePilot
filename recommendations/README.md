@@ -13,6 +13,37 @@ models:
 
 # GitFlame CodePilot Recommendation ML Service
 
+## Sprint 2: SERGE-based Agent Engine
+
+The repository now also contains a separate stateless issue-to-plan service in
+`src/agent_engine`. It keeps Sprint 1 recommendations intact and exposes the Sprint 2 contract:
+
+| Endpoint | Purpose |
+| --- | --- |
+| `GET /health` | Liveness of the Agent Engine HTTP process. |
+| `GET /ready` | Availability of the configured OpenAI-compatible model. |
+| `POST /v1/plans/generate` | Bounded issue-to-`plan.md` Agent Loop. |
+
+The Agent Engine accepts issue data, repository metadata, YAML configuration, files supplied by
+GitFlame, and optional previous-plan/correction feedback. Its only tools are `read_file`,
+`list_dir`, `grep`, and external `search_repository`. It cannot write files, run repository
+scripts, or call GitHub APIs.
+
+Run it against an OpenAI-compatible endpoint:
+
+```bash
+export AGENT_MODEL=Qwen/Qwen3-Coder-30B-A3B-Instruct
+export OPENAI_BASE_URL=http://127.0.0.1:8000/v1
+uv sync --dev
+uv run gitflame-agent-engine
+```
+
+Sprint 2 implementation details, endpoint/error contracts, benchmark commands, and report-ready
+material are in [`agent_engine_report.md`](agent_engine_report.md). Benchmark fixtures and outputs
+are under [`experiments/autogen`](experiments/autogen).
+
+---
+
 Sprint 1 deliverables for the external GitFlame AI integration service. This component accepts a
 GitFlame-style `.yml` configuration and repository file context, runs a real open-source code model,
 and returns a strictly validated recommendation response.
