@@ -4,16 +4,16 @@ import (
 	"log"
 	"net/http"
 
-	"gitflame-codepilot/backend/internal/app"
+	"gitflame-codepilot/backend/internal/config"
+	"gitflame-codepilot/backend/internal/httpapi"
 )
 
 func main() {
-	cfg := app.LoadConfig()
-	server, err := app.NewServer(cfg)
+	cfg := config.Load()
+	server, err := httpapi.New(cfg)
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer server.Close()
 
 	log.Printf("GitFlame CodePilot backend listening on %s", cfg.Addr)
 	if err := http.ListenAndServe(cfg.Addr, server.Router()); err != nil {

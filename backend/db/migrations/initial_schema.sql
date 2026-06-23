@@ -35,6 +35,7 @@ CREATE TABLE IF NOT EXISTS issue_sessions (
     status TEXT NOT NULL DEFAULT 'created',
     current_revision INTEGER NOT NULL DEFAULT 0,
     git_workflow_json JSONB,
+    request_json JSONB NOT NULL DEFAULT '{}'::jsonb,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     CONSTRAINT issue_sessions_status_check CHECK (
@@ -74,6 +75,11 @@ CREATE TABLE IF NOT EXISTS agent_tasks (
     status TEXT NOT NULL DEFAULT 'queued',
     error_message TEXT NOT NULL DEFAULT '',
     tool_execution_summary TEXT NOT NULL DEFAULT '',
+    attempt INTEGER NOT NULL DEFAULT 1,
+    error_json JSONB,
+    relevant_files JSONB NOT NULL DEFAULT '[]'::jsonb,
+    model TEXT NOT NULL DEFAULT '',
+    usage_json JSONB NOT NULL DEFAULT '{}'::jsonb,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     started_at TIMESTAMPTZ,
     completed_at TIMESTAMPTZ,
@@ -87,7 +93,8 @@ CREATE TABLE IF NOT EXISTS agent_tasks (
     ),
     CONSTRAINT agent_tasks_status_check CHECK (
         status IN ('queued', 'processing', 'completed', 'failed')
-    )
+    ),
+    CONSTRAINT agent_tasks_attempt_positive CHECK (attempt > 0)
 );
 
 CREATE TABLE IF NOT EXISTS agent_task_statuses (
