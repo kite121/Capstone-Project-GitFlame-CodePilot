@@ -15,7 +15,6 @@
 import { reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { session, connect, parseRepoUrl, webhookFor } from '../store/session.js'
-import { DEMO_REPO } from '../data/demo.js'
 import GfIcon from '../components/ui/GfIcon.vue'
 import GfButton from '../components/ui/GfButton.vue'
 import GfTooltip from '../components/ui/GfTooltip.vue'
@@ -28,10 +27,10 @@ const formEl = ref(null)
 // value already in the session so going back and forth is sticky.
 const intent = ref(session.intent || 'autogen')
 
-// The repository URL is pre-filled with the demo repo so reviewers can connect in
-// one click, but the token is intentionally empty to exercise validation.
+// The connect form starts empty in every mode, as a real user would experience it.
+// The token is always empty to exercise validation.
 const form = reactive({
-  repoUrl: session.repo.url || DEMO_REPO.url,
+  repoUrl: session.repo.url || '',
   defaultBranch: session.repo.defaultBranch || '',
   token: '',
 })

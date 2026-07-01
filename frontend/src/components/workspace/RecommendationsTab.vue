@@ -119,7 +119,10 @@ async function runAnalysis() {
   state.value = 'analyzing'
   errorMessage.value = ''
   try {
-    await api.analyzeRepository(session.repo.id)
+    await api.analyzeRepository(session.repo.id, {
+      repository: { id: session.repo.id, default_branch: session.repo.defaultBranch },
+      yaml_config: session.configYaml,
+    })
     await load()
   } catch (e) {
     errorMessage.value = e.message || 'Analysis failed.'

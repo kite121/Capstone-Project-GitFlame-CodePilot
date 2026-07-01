@@ -156,8 +156,8 @@ export const RECOMMENDATION_CATEGORIES = [
 export function defaultConfigForm() {
   return {
     defaultBranch: 'main',
-    excludePaths: ['node_modules/**', 'dist/**', 'build/**', '.git/**'],
-    categories: RECOMMENDATION_CATEGORIES.map((c) => c.id),
+    excludePaths: [],
+    categories: [],
     retentionDays: 30,
   }
 }

@@ -12,7 +12,7 @@
 // editable before approval; approval produces a generated-files contract whose
 // file operations follow {path, action, description} (generated_files_contract.md).
 import { reactive, ref, computed, onMounted, onBeforeUnmount } from 'vue'
-import { api, ApiError, pollTask } from '../../api/index.js'
+import { api, ApiError, pollTask, USING_MOCK } from '../../api/index.js'
 import { session } from '../../store/session.js'
 import { demoIssues } from '../../data/demo.js'
 import GfIcon from '../ui/GfIcon.vue'
@@ -26,6 +26,9 @@ const issueSource = ref('new') // existing | new
 
 // issue dropdown (existing issues)
 const issueMenuOpen = ref(false)
+// Demo issues are only shown in mock mode. Against a real backend there is no
+// endpoint to list repository issues yet, so the picker starts empty.
+const issues = USING_MOCK ? demoIssues : []
 
 const analyzing = ref(false)
 const approveLoading = ref(false)
@@ -56,7 +59,7 @@ const correctionText = ref('')
 
 let poller = null
 
-const issue = reactive({ id: '', title: '', body: '', author: session.repo.owner || 'roma' })
+const issue = reactive({ id: '', title: '', body: '', author: '' })
 
 const canRetry = computed(() => {
   if (!taskError.value) return false
@@ -76,7 +79,7 @@ function startNewIssue() {
   issue.id = newIssueId()
   issue.title = ''
   issue.body = ''
-  issue.author = session.repo.owner || 'roma'
+  issue.author = ''
   step.value = 'form'
 }
 function pickIssue(it) {
@@ -305,9 +308,12 @@ onBeforeUnmount(stopPolling)
                 <GfIcon name="chevronDown" :size="15" :class="{ dd__caret_open: issueMenuOpen }" class="dd__caret" />
               </button>
               <ul v-if="issueMenuOpen" class="dd__menu">
-                <li v-for="it in demoIssues" :key="it.id" class="dd__opt" @click="pickIssue(it)">
+                <li v-for="it in issues" :key="it.id" class="dd__opt" @click="pickIssue(it)">
                   <span class="dd__id mono">{{ it.id }}</span>
                   <span class="dd__title">{{ it.title }}</span>
+                </li>
+                <li v-if="!issues.length" class="dd__opt dd__opt_empty">
+                  No issues available yet — create a new one instead.
                 </li>
               </ul>
             </div>
@@ -600,6 +606,14 @@ onBeforeUnmount(stopPolling)
 }
 .dd__opt:hover {
   background: var(--gf-purple-soft);
+}
+.dd__opt_empty {
+  color: var(--gf-text-3);
+  font-size: 12.5px;
+  cursor: default;
+}
+.dd__opt_empty:hover {
+  background: transparent;
 }
 .dd__id {
   font-size: 11px;

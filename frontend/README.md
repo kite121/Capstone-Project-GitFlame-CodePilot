@@ -93,7 +93,7 @@ is visible. This is what the Version 3 screenshots / video are captured from.
 
 1. On `/`, press **Work with AI**.
 2. On the landing screen, read the explainer and the **service usage policy** link, fill
-   the connect form (repo URL is pre-filled; enter any access token and tick both consent
+   the connect form (enter a repository URL and any access token, tick both consent
    boxes — leaving them blank shows the red-underline validation), press **Continue**.
 3. **Config:** note the "i-in-circle" hints, adjust exclude paths / categories, then
    **Save .ai.yml** (unlocks the last two tabs).
